@@ -1,0 +1,250 @@
+#!/usr/bin/env bash
+# dmod: post an image to a Viva Engage community via the legacy Yammer REST API as your user ID
+# Usage: dmod <image-url>
+
+###############################################
+#################### Setup ####################
+###############################################
+
+# Paste full channel URL here
+CHANNEL_URL=https://engage.cloud.microsoft/main/groups/...
+
+# Entra ID app registration values
+CLIENT_ID=00000000-0000-0000-0000-000000000000
+TENANT_ID=00000000-0000-0000-0000-000000000000
+
+###############################################
+################## End Setup ##################
+###############################################
+
+set -u
+set -o pipefail
+
+RC_BUSSIN=420
+RC_COOKED=67
+
+cooked() {
+  printf '%s\n' "dmod: $1" >&2
+  printf 'rc: %d. something is cooked. big L bro.\n' "$RC_COOKED"
+  exit "$RC_COOKED"
+}
+
+slay() {
+  printf 'rc: %d. Blaze it.\n' "$RC_BUSSIN"
+  exit "$RC_BUSSIN"
+}
+
+stash_dir="./.dmod"
+tmp_bruh="$stash_dir/bruh"
+stash_file="$stash_dir/token.json"
+
+mkdir -p "$stash_dir" || cooked "could not create $stash_dir"
+mkdir -p "$tmp_bruh" || cooked "could not create $tmp_bruh"
+chmod 700 "$stash_dir" 2>/dev/null || true
+
+the_pic="${1:-}"
+[ -n "$the_pic" ] || cooked "no image URL provided. usage: dmod <image-url>"
+
+command -v curl >/dev/null 2>&1 || cooked "curl not found on PATH"
+command -v jq   >/dev/null 2>&1 || cooked "jq not found on PATH"
+command -v base64 >/dev/null 2>&1 || cooked "base64 not found on PATH"
+command -v file >/dev/null 2>&1 || cooked "file not found on PATH"
+
+[ -n "${CHANNEL_URL:-}" ] || cooked "CHANNEL_URL is not set in dmod"
+[ -n "${CLIENT_ID:-}" ]   || cooked "CLIENT_ID is not set in dmod"
+[ -n "${TENANT_ID:-}" ]   || cooked "TENANT_ID is not set in dmod"
+
+sus_chunk="$(printf '%s' "$CHANNEL_URL" | sed -n 's#.*/groups/\([^/?#]*\).*#\1#p')"
+[ -n "$sus_chunk" ] || cooked "CHANNEL_URL does not contain a /groups/<id>/ segment"
+
+swag_amt=$(( (4 - ${#sus_chunk} % 4) % 4 ))
+pad_swag=""
+n=0
+while [ "$n" -lt "$swag_amt" ]; do
+  pad_swag="${pad_swag}="
+  n=$((n+1))
+done
+the_tea="$(printf '%s' "${sus_chunk}${pad_swag}" | base64 -d 2>/dev/null)" \
+  || cooked "could not base64-decode group segment from CHANNEL_URL"
+the_squad="$(printf '%s' "$the_tea" | jq -er '.id | tostring' 2>/dev/null)" \
+  || cooked "could not extract numeric group id from decoded segment"
+case "$the_squad" in
+  ''|*[!0-9]*) cooked "decoded group id is not numeric: $the_squad" ;;
+esac
+
+pic_file="$tmp_bruh/image"
+hdr_file="$tmp_bruh/headers"
+trap 'rm -rf "$tmp_bruh"' EXIT
+
+rizz_code="$(curl -fsSL --max-time 30 -o "$pic_file" -D "$hdr_file" -w '%{http_code}' "$the_pic")" \
+  || cooked "image URL unreachable or returned an error: $the_pic"
+case "$rizz_code" in
+  2*) ;;
+  *) cooked "image URL returned HTTP $rizz_code" ;;
+esac
+
+mime_vibe="$(awk 'BEGIN{IGNORECASE=1} /^[Cc]ontent-[Tt]ype:/ {sub(/^[^:]*:[[:space:]]*/,""); sub(/[[:space:]]*\r?$/,""); val=$0} END{print val}' "$hdr_file")"
+case "$mime_vibe" in
+  image/*) ;;
+  *) cooked "URL did not return an image (Content-Type: ${mime_vibe:-none})" ;;
+esac
+
+bruh_vibe="$(file --mime-type -b "$pic_file" 2>/dev/null || true)"
+case "$bruh_vibe" in
+  image/*) ;;
+  *) cooked "downloaded file is not an image (bruhed: ${bruh_vibe:-unknown})" ;;
+esac
+
+the_vibes="https://api.yammer.com/user_impersonation offline_access"
+token_plug="https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token"
+device_plug="https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/devicecode"
+
+the_W=""
+
+vibe_check() { date +%s; }
+
+lock_in() {
+  local goodies="$1"
+  local tok rfsh_tok ttl unalives_at
+  tok="$(printf '%s' "$goodies" | jq -r '.access_token // empty')"
+  rfsh_tok="$(printf '%s' "$goodies" | jq -r '.refresh_token // empty')"
+  ttl="$(printf '%s' "$goodies" | jq -r '.expires_in // 3600')"
+  [ -n "$tok" ] || return 1
+  unalives_at=$(( $(vibe_check) + ttl ))
+  jq -n \
+    --arg access "$tok" \
+    --arg refresh "$rfsh_tok" \
+    --argjson expires_at "$unalives_at" \
+    '{access_token:$access, refresh_token:$refresh, expires_at:$expires_at}' \
+    > "$stash_file.tmp" || return 1
+  mv "$stash_file.tmp" "$stash_file" || return 1
+  chmod 600 "$stash_file" 2>/dev/null || true
+  the_W="$tok"
+  return 0
+}
+
+peek_stash() {
+  [ -f "$stash_file" ] || return 1
+  local tok unalives_at
+  tok="$(jq -r '.access_token // empty' "$stash_file" 2>/dev/null)"
+  unalives_at="$(jq -r '.expires_at // 0' "$stash_file" 2>/dev/null)"
+  [ -n "$tok" ] || return 1
+  case "$unalives_at" in ''|*[!0-9]*) return 1 ;; esac
+  if [ "$unalives_at" -gt "$(( $(vibe_check) + 60 ))" ]; then
+    the_W="$tok"
+    return 0
+  fi
+  return 1
+}
+
+respawn() {
+  [ -f "$stash_file" ] || return 1
+  local rfsh_tok tea
+  rfsh_tok="$(jq -r '.refresh_token // empty' "$stash_file" 2>/dev/null)"
+  [ -n "$rfsh_tok" ] || return 1
+  tea="$(curl -fsS -X POST "$token_plug" \
+    --data-urlencode "client_id=$CLIENT_ID" \
+    --data-urlencode "grant_type=refresh_token" \
+    --data-urlencode "refresh_token=$rfsh_tok" \
+    --data-urlencode "scope=$the_vibes" 2>/dev/null)" || return 1
+  printf '%s' "$tea" | jq -e '.access_token' >/dev/null 2>&1 || return 1
+  lock_in "$tea" || return 1
+  return 0
+}
+
+do_the_dance() {
+  local dc_tea dvc_code usr_code verify_link chill_secs ttl note
+  dc_tea="$(curl -fsS -X POST "$device_plug" \
+    --data-urlencode "client_id=$CLIENT_ID" \
+    --data-urlencode "scope=$the_vibes")" \
+    || cooked "device code request failed (check CLIENT_ID and TENANT_ID)"
+  dvc_code="$(printf '%s' "$dc_tea" | jq -r '.device_code // empty')"
+  usr_code="$(printf '%s' "$dc_tea" | jq -r '.user_code // empty')"
+  verify_link="$(printf '%s' "$dc_tea" | jq -r '.verification_uri // empty')"
+  chill_secs="$(printf '%s' "$dc_tea" | jq -r '.interval // 5')"
+  ttl="$(printf '%s' "$dc_tea" | jq -r '.expires_in // 900')"
+  note="$(printf '%s' "$dc_tea" | jq -r '.message // empty')"
+  [ -n "$dvc_code" ] || cooked "device code response missing device_code"
+
+  if [ -n "$note" ]; then
+    printf '%s\n' "$note" >&2
+  else
+    printf 'Open %s and enter code: %s\n' "$verify_link" "$usr_code" >&2
+  fi
+
+  local ghost_at=$(( $(vibe_check) + ttl ))
+  while [ "$(vibe_check)" -lt "$ghost_at" ]; do
+    sleep "$chill_secs"
+    local tea bruh
+    tea="$(curl -sS -X POST "$token_plug" \
+      --data-urlencode "client_id=$CLIENT_ID" \
+      --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
+      --data-urlencode "device_code=$dvc_code" 2>/dev/null)"
+    if printf '%s' "$tea" | jq -e '.access_token' >/dev/null 2>&1; then
+      lock_in "$tea" || cooked "could not write token cache"
+      return 0
+    fi
+    bruh="$(printf '%s' "$tea" | jq -r '.error // empty')"
+    case "$bruh" in
+      authorization_pending) ;;
+      slow_down) chill_secs=$((chill_secs + 5)) ;;
+      expired_token) cooked "device code expired before sign-in completed" ;;
+      access_denied) cooked "sign-in was denied by user or admin policy" ;;
+      ''|null) cooked "unexpected token endpoint response: $tea" ;;
+      *) cooked "auth error: $bruh" ;;
+    esac
+  done
+  cooked "timed out waiting for device code sign-in"
+}
+
+if ! peek_stash; then
+  if ! respawn; then
+    do_the_dance
+  fi
+fi
+[ -n "$the_W" ] || cooked "could not obtain access token"
+
+net_tea="$(curl -fsS \
+  -H "Authorization: Bearer $the_W" \
+  "https://www.yammer.com/api/v1/networks/current.json")" \
+  || cooked "could not fetch network info (check token and connectivity)"
+the_network="$(printf '%s' "$net_tea" | jq -r '.[0].id // empty')"
+[ -n "$the_network" ] || cooked "could not extract network id from: $net_tea"
+
+case "$bruh_vibe" in
+  image/jpeg|image/jpg) img_ext="jpg" ;;
+  image/png)            img_ext="png" ;;
+  image/gif)            img_ext="gif" ;;
+  image/webp)           img_ext="webp" ;;
+  *)                    img_ext="img" ;;
+esac
+img_name="image.${img_ext}"
+
+up_tea="$(curl -fsS -X POST \
+  -H "Authorization: Bearer $the_W" \
+  -F "file=@${pic_file};type=${bruh_vibe}" \
+  -F "filename=${img_name}" \
+  -F "network_id=${the_network}" \
+  -F "target_type=GROUP" \
+  -F "group_id=$the_squad" \
+  "https://filesng.yammer.com/v4/uploadSmallFile")" \
+  || cooked "image upload failed (filesng endpoint rejected the request)"
+
+#printf 'DEBUG upload response: %s\n' "$up_tea" >&2
+up_id="$(printf '%s' "$up_tea" | jq -r '.id // empty')"
+[ -n "$up_id" ] || cooked "upload response missing id: $up_tea"
+
+caption="$(printf 'dmod\n\nsent from dmod-cli')"
+
+post_tea="$(curl -fsS -X POST \
+  -H "Authorization: Bearer $the_W" \
+  --data-urlencode "body=$caption" \
+  --data-urlencode "group_id=$the_squad" \
+  --data-urlencode "attached_objects[]=uploaded_file:$up_id" \
+  "https://www.yammer.com/api/v1/messages.json")" \
+  || cooked "post creation failed (yammer messages endpoint rejected the request)"
+
+printf '%s' "$post_tea" | jq -e '.messages[0].id' >/dev/null 2>&1 \
+  || cooked "post response did not contain a message id: $post_tea"
+
+slay
